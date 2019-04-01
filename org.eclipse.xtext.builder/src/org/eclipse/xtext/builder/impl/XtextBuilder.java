@@ -9,6 +9,7 @@ package org.eclipse.xtext.builder.impl;
 
 import java.lang.reflect.Field;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 
@@ -95,6 +96,11 @@ public class XtextBuilder extends IncrementalProjectBuilder {
 	private OperationCanceledManager operationCanceledManager;
 	
 	private ClosedProjectsQueue closedProjectsQueue;
+	
+	/**
+	 * @since 2.18
+	 */
+	private Set<IProject> interestingProjects = Collections.emptySet();
 	
 	@Inject
 	private void injectClosedProjectsQueue(ISharedStateContributionRegistry sharedState) {
@@ -200,7 +206,7 @@ public class XtextBuilder extends IncrementalProjectBuilder {
 	protected IProject[] build(final int kind, Map args, IProgressMonitor monitor) throws CoreException {
 		if (IBuildFlag.FORGET_BUILD_STATE_ONLY.isSet(args)) {
 			forgetLastBuiltState();
-			return getProject().getReferencedProjects();
+			return getReferencedProjects();
 		}
 		Job.getJobManager().addJobChangeListener(MAKE_EGIT_JOB_SYSTEM);
 		long startTime = System.currentTimeMillis();
@@ -260,7 +266,15 @@ public class XtextBuilder extends IncrementalProjectBuilder {
 			task.stop();
 			Job.getJobManager().removeJobChangeListener(MAKE_EGIT_JOB_SYSTEM);
 		}
-		return getProject().getReferencedProjects();
+		return getReferencedProjects();
+	}
+
+	/**
+	 * @since 2.18
+	 */
+	protected IProject[] getReferencedProjects() throws CoreException {
+		interestingProjects = toBeBuiltComputer.getInterestingProjects(getProject());
+		return interestingProjects.toArray(new IProject[0]); 
 	}
 
 	private boolean shouldCancelBuild(int buildKind) {
@@ -305,9 +319,7 @@ public class XtextBuilder extends IncrementalProjectBuilder {
 		final SubMonitor progress = SubMonitor.convert(monitor, Messages.XtextBuilder_CollectingResources, 10);
 		progress.subTask(Messages.XtextBuilder_CollectingResources);
 		
-		if (queuedBuildData.needRebuild(getProject())) {
-			needRebuild();
-		}
+		pollQueuedBuildData();
 
 		final ToBeBuilt toBeBuilt = new ToBeBuilt();
 		IResourceDeltaVisitor visitor = createDeltaVisitor(toBeBuiltComputer, toBeBuilt, progress);
@@ -379,6 +391,8 @@ public class XtextBuilder extends IncrementalProjectBuilder {
 	protected void fullBuild(final IProgressMonitor monitor, boolean isRecoveryBuild) throws CoreException {
 		SubMonitor progress = SubMonitor.convert(monitor, 10);
 
+		pollQueuedBuildData();
+		
 		IProject project = getProject();
 		ToBeBuilt toBeBuilt = 
 			isRecoveryBuild
@@ -441,6 +455,8 @@ public class XtextBuilder extends IncrementalProjectBuilder {
 	protected void clean(IProgressMonitor monitor) throws CoreException {
 		SubMonitor progress = SubMonitor.convert(monitor, 10);
 		try {
+			pollQueuedBuildData();
+			
 			ToBeBuilt toBeBuilt = toBeBuiltComputer.removeProject(getProject(), progress.split(2));
 			if (monitor.isCanceled()) {
 				throw new OperationCanceledException();
@@ -457,6 +473,33 @@ public class XtextBuilder extends IncrementalProjectBuilder {
 			if (monitor != null)
 				monitor.done();
 		}
+	}
+
+	/**
+	 * @since 2.18
+	 */
+	protected void pollQueuedBuildData() {
+		boolean needRebuild = false;
+		if (pollQueuedBuildData(getProject())) {
+			needRebuild = true;
+		}
+		for(IProject project: interestingProjects) {
+			if (!XtextProjectHelper.hasNature(project)) {
+				if (pollQueuedBuildData(project)) {
+					needRebuild = true;
+				}	
+			}
+		}
+		if(needRebuild) {
+			needRebuild();
+		}
+	}
+	
+	/**
+	 * @since 2.18
+	 */
+	protected boolean pollQueuedBuildData(IProject project) {
+		return queuedBuildData.needRebuild(project);
 	}
 
 	/**
